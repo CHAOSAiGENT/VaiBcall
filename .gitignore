@@ -19,3 +19,7 @@ node_modules/
 
 # Whisper models (large, downloaded locally)
 models/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
