@@ -196,11 +196,15 @@ fn load_wav(path: &Path) -> Result<Vec<f32>, TranscribeError> {
     };
 
     // Resample to 16kHz if needed
-    if sample_rate != 16000 {
-        Ok(resample(&mono, sample_rate, 16000))
+    let resampled = if sample_rate != 16000 {
+        resample(&mono, sample_rate, 16000)
     } else {
-        Ok(mono)
-    }
+        mono
+    };
+
+    // Auto-normalize: if peak is below target, boost so whisper gets usable levels.
+    // Quiet mics (e.g. MacBook Pro) can produce peaks of 0.004 which whisper can't detect.
+    Ok(normalize_audio(resampled))
 }
 
 /// Decode audio with symphonia (handles m4a, mp3, ogg, etc.)
@@ -293,11 +297,13 @@ fn decode_with_symphonia(path: &Path) -> Result<Vec<f32>, TranscribeError> {
     }
 
     // Resample to 16kHz if needed
-    if sample_rate != 16000 {
-        Ok(resample(&all_samples, sample_rate, 16000))
+    let resampled = if sample_rate != 16000 {
+        resample(&all_samples, sample_rate, 16000)
     } else {
-        Ok(all_samples)
-    }
+        all_samples
+    };
+
+    Ok(normalize_audio(resampled))
 }
 
 /// Simple linear interpolation resampler.
@@ -326,6 +332,38 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     }
 
     output
+}
+
+/// Normalize audio to a target peak level for consistent whisper input.
+/// Only boosts quiet audio — already-loud recordings are left untouched.
+fn normalize_audio(mut samples: Vec<f32>) -> Vec<f32> {
+    if samples.is_empty() {
+        return samples;
+    }
+
+    let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+
+    // Target peak: 0.5 (leaves headroom, loud enough for whisper)
+    // Only normalize if peak is below 0.1 (quiet mic) and above noise floor
+    const TARGET_PEAK: f32 = 0.5;
+    const QUIET_THRESHOLD: f32 = 0.1;
+    const NOISE_FLOOR: f32 = 0.0001;
+
+    if peak < QUIET_THRESHOLD && peak > NOISE_FLOOR {
+        let gain = TARGET_PEAK / peak;
+        // Cap gain at 100x to avoid amplifying pure noise
+        let gain = gain.min(100.0);
+        tracing::info!(
+            peak = format!("{:.4}", peak),
+            gain = format!("{:.1}x", gain),
+            "auto-normalizing quiet audio"
+        );
+        for s in &mut samples {
+            *s = (*s * gain).clamp(-1.0, 1.0);
+        }
+    }
+
+    samples
 }
 
 /// Resolve the whisper model file path.
@@ -393,6 +431,31 @@ mod tests {
         let samples = vec![1.0f32, 2.0, 3.0, 4.0];
         let resampled = resample(&samples, 16000, 16000);
         assert_eq!(samples, resampled);
+    }
+
+    #[test]
+    fn normalize_boosts_quiet_audio() {
+        // Peak 0.01 → gain = 0.5/0.01 = 50x → new peak = 0.5
+        let samples = vec![0.005f32, -0.008, 0.01, -0.003, 0.007];
+        let normalized = normalize_audio(samples);
+        let peak = normalized.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(peak > 0.4, "expected peak > 0.4, got {}", peak);
+        assert!(peak <= 0.5, "expected peak <= 0.5, got {}", peak);
+    }
+
+    #[test]
+    fn normalize_leaves_loud_audio_untouched() {
+        let samples = vec![0.3f32, -0.5, 0.2, -0.1];
+        let normalized = normalize_audio(samples.clone());
+        assert_eq!(samples, normalized);
+    }
+
+    #[test]
+    fn normalize_ignores_noise_floor() {
+        let samples = vec![0.00001f32, -0.00002, 0.00001];
+        let normalized = normalize_audio(samples.clone());
+        // Below noise floor — should not be boosted
+        assert_eq!(samples, normalized);
     }
 
     #[test]
