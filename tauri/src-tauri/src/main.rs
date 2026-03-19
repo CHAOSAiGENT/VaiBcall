@@ -133,6 +133,20 @@ fn main() {
             let note_item = MenuItem::with_id(app, "note", "Add Note...", true, None::<&str>)?;
             let list_item =
                 MenuItem::with_id(app, "list", "Open Meetings Folder", true, None::<&str>)?;
+            let paste_summary_item = MenuItem::with_id(
+                app,
+                "paste-summary",
+                "Paste Latest Summary",
+                true,
+                None::<&str>,
+            )?;
+            let paste_transcript_item = MenuItem::with_id(
+                app,
+                "paste-transcript",
+                "Paste Latest Transcript",
+                true,
+                None::<&str>,
+            )?;
             let sep2 = MenuItem::with_id(app, "sep2", "──────────", false, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit Minutes", true, None::<&str>)?;
 
@@ -147,6 +161,8 @@ fn main() {
                     &sep,
                     &note_item,
                     &list_item,
+                    &paste_summary_item,
+                    &paste_transcript_item,
                     &sep2,
                     &quit_item,
                 ],
@@ -280,6 +296,32 @@ fn main() {
                             let meetings_dir =
                                 dirs::home_dir().unwrap_or_default().join("meetings");
                             let _ = std::process::Command::new("open").arg(meetings_dir).spawn();
+                        }
+                        "paste-summary" | "paste-transcript" => {
+                            let target_app = commands::frontmost_application_name();
+                            let kind = if event.id.as_ref() == "paste-summary" {
+                                "summary"
+                            } else {
+                                "transcript"
+                            };
+                            match commands::paste_latest_artifact(
+                                &latest_output,
+                                kind,
+                                target_app.as_deref(),
+                            ) {
+                                Ok(message) => {
+                                    commands::show_user_notification(
+                                        &format!("Paste latest {}", kind),
+                                        &message,
+                                    );
+                                }
+                                Err(err) => {
+                                    commands::show_user_notification(
+                                        &format!("Paste latest {}", kind),
+                                        &err,
+                                    );
+                                }
+                            }
                         }
                         "quit" => {
                             if commands::recording_active(&recording) {

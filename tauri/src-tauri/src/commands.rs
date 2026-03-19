@@ -296,7 +296,7 @@ fn maybe_show_completion_notification(
         .spawn();
 }
 
-fn show_hotkey_notification(title: &str, body: &str) {
+pub fn show_user_notification(title: &str, body: &str) {
     let script = format!(
         "display notification \"{}\" with title \"Minutes\" subtitle \"{}\"",
         escape_applescript_literal(body),
@@ -307,6 +307,149 @@ fn show_hotkey_notification(title: &str, body: &str) {
         .arg("-e")
         .arg(script)
         .spawn();
+}
+
+pub fn frontmost_application_name() -> Option<String> {
+    let script = r#"tell application "System Events" to get name of first application process whose frontmost is true"#;
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() || name == "Minutes" {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn latest_saved_artifact_path(
+    latest_output: &Arc<Mutex<Option<OutputNotice>>>,
+) -> Result<PathBuf, String> {
+    if let Ok(current) = latest_output.lock() {
+        if let Some(notice) = current.clone() {
+            if notice.kind == "saved" && !notice.path.trim().is_empty() {
+                let path = PathBuf::from(notice.path);
+                if path.exists() {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+
+    let config = Config::load();
+    let filters = minutes_core::search::SearchFilters {
+        content_type: None,
+        since: None,
+        attendee: None,
+    };
+    let latest = minutes_core::search::search("", &config, &filters)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No saved meetings or memos yet.".to_string())?;
+    Ok(latest.path)
+}
+
+fn extract_paste_text(content: &str, kind: &str) -> Result<String, String> {
+    let (_, body) = minutes_core::markdown::split_frontmatter(content);
+    let sections = parse_sections(body);
+    let target_heading = match kind {
+        "summary" => "Summary",
+        "transcript" => "Transcript",
+        other => {
+            return Err(format!(
+                "Unsupported paste payload: {}. Use 'summary' or 'transcript'.",
+                other
+            ));
+        }
+    };
+
+    sections
+        .into_iter()
+        .find(|section| section.heading.eq_ignore_ascii_case(target_heading))
+        .map(|section| section.content.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| format!("The latest artifact does not contain a {} section.", kind))
+}
+
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut child = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not start pbcopy: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("Could not write to clipboard: {}", e))?;
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("Could not finish clipboard write: {}", e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("pbcopy failed to update the clipboard.".into())
+    }
+}
+
+fn paste_into_application(app_name: &str) -> Result<(), String> {
+    let script = format!(
+        r#"tell application "{}" to activate
+delay 0.15
+tell application "System Events" to keystroke "v" using command down"#,
+        escape_applescript_literal(app_name)
+    );
+
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|e| format!("Could not run paste automation: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "Paste automation failed{}. Minutes already copied the text to your clipboard.",
+            if stderr.trim().is_empty() {
+                ".".to_string()
+            } else {
+                format!(" ({})", stderr.trim())
+            }
+        ))
+    }
+}
+
+pub fn paste_latest_artifact(
+    latest_output: &Arc<Mutex<Option<OutputNotice>>>,
+    kind: &str,
+    target_app: Option<&str>,
+) -> Result<String, String> {
+    let path = latest_saved_artifact_path(latest_output)?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Could not read latest artifact {}: {}", path.display(), e))?;
+    let payload = extract_paste_text(&content, kind)?;
+    copy_to_clipboard(&payload)?;
+
+    if let Some(app_name) = target_app.filter(|name| !name.trim().is_empty()) {
+        paste_into_application(app_name)?;
+        Ok(format!("Pasted latest {} into {}.", kind, app_name))
+    } else {
+        Ok(format!(
+            "Copied latest {} to the clipboard. Switch to your app and paste.",
+            kind
+        ))
+    }
 }
 
 fn parse_sections(body: &str) -> Vec<MeetingSection> {
@@ -728,7 +871,7 @@ pub fn handle_global_hotkey(app: &tauri::AppHandle) {
 
     if recording_active(&state.recording) {
         if let Err(err) = request_stop(&state.recording, &state.stop_flag) {
-            show_hotkey_notification(
+            show_user_notification(
                 "Quick thought",
                 &format!("Could not stop recording: {}", err),
             );
@@ -737,7 +880,7 @@ pub fn handle_global_hotkey(app: &tauri::AppHandle) {
     }
 
     if minutes_core::pid::status().processing || state.processing.load(Ordering::Relaxed) {
-        show_hotkey_notification(
+        show_user_notification(
             "Quick thought",
             "Minutes is still processing the previous capture. Finish that first.",
         );
@@ -1301,5 +1444,18 @@ mod tests {
     #[test]
     fn validate_hotkey_shortcut_rejects_unknown_values() {
         assert!(validate_hotkey_shortcut("CmdOrCtrl+Shift+P").is_err());
+    }
+
+    #[test]
+    fn extract_paste_text_returns_summary_section() {
+        let content = "---\ntitle: Demo\n---\n\n## Summary\n\nShort summary.\n\n## Transcript\n\nFull transcript.\n";
+        let summary = extract_paste_text(content, "summary").unwrap();
+        assert_eq!(summary, "Short summary.");
+    }
+
+    #[test]
+    fn extract_paste_text_rejects_missing_summary() {
+        let content = "---\ntitle: Demo\n---\n\n## Transcript\n\nFull transcript.\n";
+        assert!(extract_paste_text(content, "summary").is_err());
     }
 }
