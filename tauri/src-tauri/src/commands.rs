@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use tauri::Manager;
 
 pub struct AppState {
     pub recording: Arc<AtomicBool>,
@@ -11,6 +12,7 @@ pub struct AppState {
     pub processing: Arc<AtomicBool>,
     pub processing_stage: Arc<Mutex<Option<String>>>,
     pub latest_output: Arc<Mutex<Option<OutputNotice>>>,
+    pub completion_notifications_enabled: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -151,6 +153,57 @@ fn set_latest_output(
     if let Ok(mut current) = latest_output.lock() {
         *current = notice;
     }
+}
+
+fn display_path(path: &str) -> String {
+    if let Some(home) = dirs::home_dir() {
+        let home_display = home.display().to_string();
+        if let Some(stripped) = path.strip_prefix(&home_display) {
+            return format!("~{}", stripped);
+        }
+    }
+    path.to_string()
+}
+
+fn escape_applescript_literal(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', " ")
+}
+
+fn maybe_show_completion_notification(
+    app_handle: &tauri::AppHandle,
+    notifications_enabled: &Arc<AtomicBool>,
+    notice: &OutputNotice,
+) {
+    if !notifications_enabled.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let should_notify = app_handle
+        .get_webview_window("main")
+        .map(|window| {
+            let visible = window.is_visible().ok().unwrap_or(false);
+            let focused = window.is_focused().ok().unwrap_or(false);
+            !(visible && focused)
+        })
+        .unwrap_or(true);
+
+    if !should_notify {
+        return;
+    }
+
+    let body = format!("{} {}", notice.detail, display_path(&notice.path));
+    let script = format!(
+        "display notification \"{}\" with title \"Minutes\" subtitle \"{}\"",
+        escape_applescript_literal(&body),
+        escape_applescript_literal(&notice.title)
+    );
+
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .spawn();
 }
 
 fn parse_sections(body: &str) -> Vec<MeetingSection> {
@@ -411,12 +464,13 @@ fn scan_recovery_items(config: &Config) -> Vec<RecoveryItem> {
 
 /// Start recording in a background thread.
 pub fn start_recording(
-    _app_handle: tauri::AppHandle,
+    app_handle: tauri::AppHandle,
     recording: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
     processing: Arc<AtomicBool>,
     processing_stage: Arc<Mutex<Option<String>>>,
     latest_output: Arc<Mutex<Option<OutputNotice>>>,
+    completion_notifications_enabled: Arc<AtomicBool>,
 ) {
     recording.store(true, Ordering::Relaxed);
     stop_flag.store(false, Ordering::Relaxed);
@@ -453,14 +507,17 @@ pub fn start_recording(
             ) {
                 Ok(result) => {
                     remove_current_wav = true;
-                    set_latest_output(
-                        &latest_output,
-                        Some(OutputNotice {
-                            kind: "saved".into(),
-                            title: result.title.clone(),
-                            path: result.path.display().to_string(),
-                            detail: "Saved meeting markdown".into(),
-                        }),
+                    let notice = OutputNotice {
+                        kind: "saved".into(),
+                        title: result.title.clone(),
+                        path: result.path.display().to_string(),
+                        detail: "Saved meeting markdown".into(),
+                    };
+                    set_latest_output(&latest_output, Some(notice.clone()));
+                    maybe_show_completion_notification(
+                        &app_handle,
+                        &completion_notifications_enabled,
+                        &notice,
                     );
                     eprintln!(
                         "Saved: {} ({} words)",
@@ -470,16 +527,18 @@ pub fn start_recording(
                 }
                 Err(e) => {
                     if let Some(saved) = preserve_failed_capture(&wav_path, &config) {
-                        set_latest_output(
-                            &latest_output,
-                            Some(OutputNotice {
-                                kind: "preserved-capture".into(),
-                                title: "Raw capture preserved".into(),
-                                path: saved.display().to_string(),
-                                detail:
-                                    "Processing failed, but the raw audio capture was preserved."
-                                        .into(),
-                            }),
+                        let notice = OutputNotice {
+                            kind: "preserved-capture".into(),
+                            title: "Raw capture preserved".into(),
+                            path: saved.display().to_string(),
+                            detail: "Processing failed, but the raw audio capture was preserved."
+                                .into(),
+                        };
+                        set_latest_output(&latest_output, Some(notice.clone()));
+                        maybe_show_completion_notification(
+                            &app_handle,
+                            &completion_notifications_enabled,
+                            &notice,
                         );
                         eprintln!(
                             "Pipeline error: {}. Raw audio preserved at {}",
@@ -499,14 +558,19 @@ pub fn start_recording(
         Err(e) => {
             recording.store(false, Ordering::Relaxed);
             if let Some(saved) = preserve_failed_capture(&wav_path, &config) {
-                set_latest_output(
-                    &latest_output,
-                    Some(OutputNotice {
-                        kind: "preserved-capture".into(),
-                        title: "Partial capture preserved".into(),
-                        path: saved.display().to_string(),
-                        detail: "Recording failed before processing, but the captured audio was preserved.".into(),
-                    }),
+                let notice = OutputNotice {
+                    kind: "preserved-capture".into(),
+                    title: "Partial capture preserved".into(),
+                    path: saved.display().to_string(),
+                    detail:
+                        "Recording failed before processing, but the captured audio was preserved."
+                            .into(),
+                };
+                set_latest_output(&latest_output, Some(notice.clone()));
+                maybe_show_completion_notification(
+                    &app_handle,
+                    &completion_notifications_enabled,
+                    &notice,
                 );
                 eprintln!(
                     "Capture error: {}. Partial audio preserved at {}",
@@ -543,10 +607,19 @@ pub fn cmd_start_recording(
     let processing = state.processing.clone();
     let processing_stage = state.processing_stage.clone();
     let latest_output = state.latest_output.clone();
+    let completion_notifications_enabled = state.completion_notifications_enabled.clone();
     crate::update_tray_state(&app, true);
     let app_done = app.clone();
     std::thread::spawn(move || {
-        start_recording(app, rec, stop, processing, processing_stage, latest_output);
+        start_recording(
+            app,
+            rec,
+            stop,
+            processing,
+            processing_stage,
+            latest_output,
+            completion_notifications_enabled,
+        );
         crate::update_tray_state(&app_done, false);
     });
     Ok(())
@@ -663,6 +736,13 @@ pub fn cmd_open_file(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn cmd_clear_latest_output(state: tauri::State<AppState>) {
     set_latest_output(&state.latest_output, None);
+}
+
+#[tauri::command]
+pub fn cmd_set_completion_notifications(state: tauri::State<AppState>, enabled: bool) {
+    state
+        .completion_notifications_enabled
+        .store(enabled, Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -954,6 +1034,14 @@ mod tests {
         let status = model_status(&config);
         assert_eq!(status.label, "Speech model");
         assert_eq!(status.state, "attention");
+    }
+
+    #[test]
+    fn display_path_rewrites_home_prefix() {
+        let home = dirs::home_dir().unwrap();
+        let path = home.join("meetings/demo.md");
+        let displayed = display_path(&path.display().to_string());
+        assert!(displayed.starts_with("~/"));
     }
 
     #[test]

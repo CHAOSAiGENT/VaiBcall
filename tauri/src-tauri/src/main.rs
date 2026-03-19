@@ -68,6 +68,7 @@ fn main() {
     let processing = Arc::new(AtomicBool::new(false));
     let processing_stage = Arc::new(Mutex::new(None));
     let latest_output = Arc::new(Mutex::new(None));
+    let completion_notifications_enabled = Arc::new(AtomicBool::new(true));
     let recording_clone = recording.clone();
     let stop_clone = stop_flag.clone();
 
@@ -79,6 +80,7 @@ fn main() {
             processing: processing.clone(),
             processing_stage: processing_stage.clone(),
             latest_output: latest_output.clone(),
+            completion_notifications_enabled: completion_notifications_enabled.clone(),
         })
         .setup(move |app| {
             let initial_recording = minutes_core::pid::status().recording;
@@ -159,6 +161,8 @@ fn main() {
                             let processing = processing.clone();
                             let processing_stage = processing_stage.clone();
                             let latest_output = latest_output.clone();
+                            let completion_notifications_enabled =
+                                completion_notifications_enabled.clone();
                             let ri = rec_item.clone();
                             let si = stp_item.clone();
                             std::thread::spawn(move || {
@@ -169,6 +173,7 @@ fn main() {
                                     processing,
                                     processing_stage,
                                     latest_output,
+                                    completion_notifications_enabled,
                                 );
                                 ri.set_text("Start Recording").ok();
                                 ri.set_enabled(true).ok();
@@ -246,6 +251,7 @@ fn main() {
             commands::cmd_stop_recording,
             commands::cmd_open_file,
             commands::cmd_clear_latest_output,
+            commands::cmd_set_completion_notifications,
             commands::cmd_permission_center,
             commands::cmd_recovery_items,
             commands::cmd_retry_recovery,

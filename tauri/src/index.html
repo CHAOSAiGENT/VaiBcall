@@ -761,6 +761,27 @@
       line-height: 1.45;
     }
 
+    .about-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .about-controls-copy {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.45;
+    }
+
+    .toggle-btn {
+      width: auto;
+      min-width: 94px;
+    }
+
     /* ── Readiness view ── */
     .readiness-overlay {
       position: fixed;
@@ -1258,6 +1279,12 @@
       <div class="about-footer">
         Minutes is open source, markdown-backed, and designed so the artifact remains valuable even outside this app.
       </div>
+      <div class="about-controls">
+        <div class="about-controls-copy">
+          Show native completion notifications when processing finishes in the background.
+        </div>
+        <button class="btn btn-secondary btn-sm toggle-btn" id="btn-toggle-notifications">On</button>
+      </div>
     </div>
   </div>
 
@@ -1380,6 +1407,7 @@
     const detailScroll = document.getElementById('detail-scroll');
     const openExternalBtn = document.getElementById('btn-open-external');
     const aboutOverlay = document.getElementById('about-overlay');
+    const notificationToggle = document.getElementById('btn-toggle-notifications');
     const readinessOverlay = document.getElementById('readiness-overlay');
     const readinessButton = document.getElementById('btn-readiness');
     const readinessScroll = document.getElementById('readiness-scroll');
@@ -1397,6 +1425,7 @@
     let latestOutput = null;
     let readinessItems = [];
     let recoveryItems = [];
+    let notifyOnCompletion = true;
     let pollInterval = null;
     const NUM_BARS = 32;
     const audioViz = document.getElementById('audio-viz');
@@ -1501,6 +1530,14 @@
       outputNoticeDetail.textContent = notice.detail || '';
       outputNoticePath.textContent = notice.path || '';
       document.getElementById('btn-open-output').textContent = isCapture ? 'Open Capture' : 'Open Meeting';
+    }
+
+    function setNotificationToggle(enabled) {
+      notifyOnCompletion = enabled;
+      notificationToggle.textContent = enabled ? 'On' : 'Off';
+      notificationToggle.classList.toggle('btn-primary', enabled);
+      notificationToggle.classList.toggle('btn-secondary', !enabled);
+      localStorage.setItem('minutes.notifyOnCompletion', enabled ? 'true' : 'false');
     }
 
     function closeReadiness() {
@@ -2175,6 +2212,15 @@
     aboutOverlay.addEventListener('click', (e) => {
       if (e.target === aboutOverlay) closeAbout();
     });
+    notificationToggle.addEventListener('click', async () => {
+      const next = !notifyOnCompletion;
+      try {
+        await invoke('cmd_set_completion_notifications', { enabled: next });
+        setNotificationToggle(next);
+      } catch (e) {
+        console.error('Set notifications:', e);
+      }
+    });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && aboutOverlay.classList.contains('active')) {
         closeAbout();
@@ -2199,6 +2245,15 @@
     });
 
     // ── Init ──
+    const storedNotify = localStorage.getItem('minutes.notifyOnCompletion');
+    if (storedNotify === 'false') {
+      setNotificationToggle(false);
+    } else {
+      setNotificationToggle(true);
+    }
+    invoke('cmd_set_completion_notifications', { enabled: notifyOnCompletion }).catch((e) => {
+      console.error('Init notifications:', e);
+    });
     checkSetup();
     checkStatus();
     loadReadinessItems();
