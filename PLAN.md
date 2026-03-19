@@ -460,9 +460,77 @@ To avoid becoming a confused imitation of other tools, Minutes should not priori
 - proprietary lock-in over markdown portability
 - desktop-only features that break parity with CLI/MCP users
 
+#### Anti-Goals In Practice
+
+These examples are here so the plan keeps its shape under implementation pressure:
+
+- If we are choosing between:
+  - a beautiful onboarding animation
+  - and a guaranteed test recording that writes a markdown artifact
+  - we choose the artifact every time.
+
+- If we are choosing between:
+  - a clever desktop-only shortcut
+  - and making the same workflow reliable from CLI + MCP
+  - we choose parity first.
+
+- If we are choosing between:
+  - a feature that requires Accessibility or Screen Recording
+  - and a simpler feature that improves capture confidence without new permissions
+  - we choose the lower-permission path first.
+
+- If we are choosing between:
+  - hiding system details behind a "magic" UI
+  - and clearly showing where files live, what failed, and how to retry
+  - we choose clarity.
+
 ### Concrete Plan Additions
 
 These are the product-quality tasks we should schedule after the current core roadmap items.
+
+### Recommended Delivery Order
+
+The experience work should ship in this order:
+
+1. **Trust + clarity first**
+   - permission center
+   - output destination clarity
+   - recovery center
+   - completion notifications
+2. **Confidence polish second**
+   - capture cue system
+   - parity audit across surfaces
+   - onboarding that guarantees a first saved artifact
+3. **Speed workflows third**
+   - hotkey spec
+   - opt-in hotkeys
+   - quick thought mode
+   - optional paste/insert workflows
+4. **Distribution polish fourth**
+   - signed releases
+   - release-channel policy
+   - reproducible notes
+   - auto-update evaluation last
+
+Reasoning:
+- This order maximizes trust before delight.
+- It preserves the open-source/local-first posture.
+- It prevents us from polishing a shaky capture experience.
+
+### Dependencies and Gates
+
+These are the main execution dependencies for the new experience roadmap:
+
+| Area | Depends on | Why |
+|------|------------|-----|
+| Permission center | Stable permission detection APIs in Tauri/core | Avoid UI that lies about system state |
+| Capture cue system | Reliable recording lifecycle and failure states | Sounds are only useful if they match reality |
+| First successful artifact onboarding | Model download, microphone flow, output writing | Onboarding should end in a real artifact, not a fake success state |
+| Surface parity audit | Mature CLI + MCP + tray flows | Audit is meaningless before the surfaces stabilize |
+| Recovery center | Failed capture preservation + retry paths | UI should expose actual recovery affordances, not placeholders |
+| Hotkey implementation | Hotkey behavior spec + permission decision | Prevent ad hoc global shortcut behavior |
+| Paste latest artifact | Stable artifact metadata + clear trust model | Avoid creeping into surveillance/automation prematurely |
+| Auto-update evaluation | Signed/notarized releases + release channel policy | Updating before release discipline is established is backwards |
 
 #### Phase 3a: Capture Experience Excellence — "Calm, trusted, agent-native"
 
@@ -478,6 +546,46 @@ These are the product-quality tasks we should schedule after the current core ro
 | P3a.6 | **Completion notifications** — optional macOS notification when a long recording has finished processing and been written to disk. | TBD |
 | P3a.7 | **Output destination clarity** — every successful flow points clearly to the saved markdown path and, when relevant, the preserved source capture path. | TBD |
 
+**Recommended execution order within Phase 3a**
+
+1. P3a.2 Permission center
+2. P3a.7 Output destination clarity
+3. P3a.5 Recovery center
+4. P3a.6 Completion notifications
+5. P3a.1 Capture cue system
+6. P3a.4 Surface parity audit
+7. P3a.3 First successful artifact onboarding
+
+**Phase 3a exit criteria**
+
+- New user reaches first saved artifact in under 3 minutes on a clean machine with a network connection.
+- Every successful recording flow exposes the saved markdown path.
+- Every failed live capture preserves either:
+  - the raw capture
+  - or an explicit reason no recoverable capture exists.
+- Tray, CLI, and MCP start/stop/status semantics match for the same recording session.
+- Permission center correctly distinguishes:
+  - required now
+  - optional
+  - unavailable but non-blocking
+
+**Phase 3a success metrics**
+
+- Time to first saved artifact: median under 3 minutes
+- Silent-loss incidents: zero tolerated
+- Recovery visibility: 100% of failed captures produce a user-visible recovery path
+- Surface parity: all core flows pass the compatibility checklist below
+- Onboarding completion: target 80%+ for users who begin model download
+
+**Issue stubs to create before implementation**
+
+- P3a.2 permission center
+- P3a.7 output destination clarity
+- P3a.5 recovery center
+- P3a.1 capture cue system
+- P3a.4 surface parity audit
+- P3a.3 artifact-first onboarding
+
 #### Phase 3b: Optional Power Capture — "Fast capture for people who want it"
 
 **Goal**: add high-speed capture modes without making them the product's default identity.
@@ -489,6 +597,32 @@ These are the product-quality tasks we should schedule after the current core ro
 | P3b.3 | **Quick thought mode** — short-form memo capture path optimized for spontaneous idea capture, still ending in normal markdown output. | TBD |
 | P3b.4 | **Paste latest artifact** — optional power-user command to paste the latest transcript/summary into the current app, clearly separated from core Minutes workflows. | TBD |
 
+**Recommended execution order within Phase 3b**
+
+1. P3b.1 Hotkey behavior spec
+2. P3b.3 Quick thought mode
+3. P3b.2 Opt-in global hotkey
+4. P3b.4 Paste latest artifact
+
+**Phase 3b gates**
+
+- Do not start P3b.2 before P3b.1 is written and reviewed.
+- Do not start P3b.4 before we are comfortable with the permission story and trust implications.
+- Quick thought mode must still produce the same durable markdown artifact model as other capture paths.
+
+**Phase 3b exit criteria**
+
+- Hotkey behavior is documented before shipping.
+- Global hotkey remains opt-in and clearly permission-scoped.
+- Quick thought mode creates standard memo artifacts that remain searchable through CLI/MCP.
+- No power-capture feature becomes required for core Minutes value.
+
+**Phase 3b success metrics**
+
+- Hotkey confusion reports stay low because behavior is documented and consistent.
+- Quick-thought artifact creation succeeds at the same rate as standard memo capture.
+- Accessibility-dependent workflows remain a minority, not a prerequisite.
+
 #### Phase 3c: Open-Source Distribution Polish — "Trustworthy to install, boring to maintain"
 
 **Goal**: make the app operationally polished enough for non-technical users without compromising auditability.
@@ -499,6 +633,31 @@ These are the product-quality tasks we should schedule after the current core ro
 | P3c.2 | Release channel policy — stable vs preview, changelog quality bar, rollback plan | TBD |
 | P3c.3 | Evaluate auto-update strategy (Sparkle or equivalent) with explicit OSS trust requirements and manual-update fallback | TBD |
 | P3c.4 | Reproducible release notes: what changed for CLI, desktop, and MCP users in each release | TBD |
+
+**Recommended execution order within Phase 3c**
+
+1. P3c.1 Signed + notarized release pipeline
+2. P3c.2 Release channel policy
+3. P3c.4 Reproducible release notes
+4. P3c.3 Auto-update evaluation
+
+**Phase 3c gates**
+
+- No auto-update rollout before signed/notarized releases are routine.
+- No opaque update mechanism that hides the manual install path.
+- Release notes must cover CLI, desktop, and MCP implications separately.
+
+**Phase 3c exit criteria**
+
+- A non-technical user can install a trusted release without bypassing scary macOS warnings.
+- Every release explains what changed across surfaces.
+- Auto-update, if adopted, is transparent, reversible, and optional or clearly disclosed.
+
+**Phase 3c success metrics**
+
+- Install friction drops measurably after signing/notarization.
+- Release notes become consistent enough to support user trust and debugging.
+- If auto-update ships, users can still choose a manual deterministic update path.
 
 ### Agent-Native Compatibility Checklist
 
@@ -522,6 +681,18 @@ Minutes is 10/10 when:
 - the app feels calm and trustworthy at the moment of capture
 - the markdown output remains useful even if the app disappeared tomorrow
 - Claude/Cowork/Codex-style workflows feel like a natural extension of the product, not a bolted-on integration layer
+
+### Working Definition Of Done For Experience Work
+
+A capture-experience feature is not done when the UI exists. It is done when:
+
+- the tray flow works
+- the CLI/MCP semantics still make sense
+- the saved artifact is clear
+- permission behavior is honest
+- failure/recovery behavior is explicit
+- the docs and release notes tell users what changed
+- the feature still feels like Minutes, not a separate mini-product
 
 ---
 
