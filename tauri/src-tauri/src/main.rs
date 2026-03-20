@@ -173,7 +173,7 @@ fn refresh_calendar_items(
     for (i, event) in events.iter().enumerate() {
         let label = format_calendar_label(event);
         if let Ok(item) =
-            MenuItem::with_id(app, &format!("cal-{}", i), &label, true, None::<&str>)
+            MenuItem::with_id(app, format!("cal-{}", i), &label, true, None::<&str>)
         {
             if menu.insert(&item, 2 + i).is_ok() {
                 state.items.push(item);
