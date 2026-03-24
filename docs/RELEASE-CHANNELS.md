@@ -66,7 +66,7 @@ The release note does not need to be long, but it must be explicit.
 Examples of acceptable cross-surface phrasing:
 
 - `Desktop: adds signed Minutes.app with notarized dmg`
-- `Desktop (Windows): adds experimental tray binary as minutes-desktop-windows-x64.exe`
+- `Desktop (Windows): adds experimental NSIS installer as minutes-desktop-windows-x64-setup.exe and raw fallback binary`
 - `CLI: no command changes in this release`
 - `MCP: new quick-thought mode available through start_recording(mode=...)`
 

@@ -462,13 +462,13 @@ cargo tauri build --bundles app
 ```
 
 ```powershell
-# Windows — build desktop binary from source
+# Windows — build desktop installer from source
 cargo install tauri-cli --version 2.10.1 --locked
 cd tauri/src-tauri
-cargo tauri build --ci --no-bundle
+cargo tauri build --ci --bundles nsis --no-sign
 ```
 
-Tagged GitHub releases can also include a Windows desktop binary as `minutes-desktop-windows-x64.exe`.
+Tagged GitHub releases can include both a Windows NSIS installer as `minutes-desktop-windows-x64-setup.exe` and a raw desktop binary as `minutes-desktop-windows-x64.exe`. The installer is currently unsigned, so treat it as an advanced-user / preview distribution surface until Windows signing is added.
 
 The desktop app adds a system tray icon, recording controls, audio visualizer, Recall, and a meeting list window. The current Windows desktop build covers recording, transcription, search, settings, and Recall. Calendar suggestions, call detection, tray copy/paste automation, and the native dictation hotkey remain macOS-only for now.
 

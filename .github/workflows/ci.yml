@@ -101,7 +101,7 @@ jobs:
         run: minutes --version
 
   desktop_windows:
-    name: Desktop App (windows-latest)
+    name: Desktop App Installer (windows-latest)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -121,9 +121,9 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "2.10.1" --locked
 
-      - name: Build Windows desktop app (no bundle)
+      - name: Build Windows NSIS installer (unsigned)
         working-directory: tauri/src-tauri
-        run: cargo tauri build --ci --no-bundle
+        run: cargo tauri build --ci --bundles nsis --no-sign
 
   mcp:
     name: MCP Server
