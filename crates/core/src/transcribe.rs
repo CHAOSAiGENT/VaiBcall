@@ -165,6 +165,12 @@ fn transcribe_with_whisper(
     // Layer 2: Remove repetition loops — detect consecutive near-identical segments
     let lines = dedup_segments(lines);
 
+    // Layer 4: Remove interleaved repetition (A/B/A/B patterns, filler-separated loops)
+    let lines = dedup_interleaved(lines);
+
+    // Layer 5: Trim trailing noise ([music], [BLANK_AUDIO]) from the end
+    let lines = trim_trailing_noise(lines);
+
     let transcript = lines.join("\n");
     let transcript = if transcript.is_empty() {
         transcript
@@ -636,6 +642,289 @@ fn dedup_segments(lines: Vec<String>) -> Vec<String> {
     }
 
     result
+}
+
+/// Clean an existing transcript by running all post-processing dedup layers.
+///
+/// Use this to re-process previously transcribed meetings through the improved
+/// hallucination detection (interleaved patterns, trailing noise). Takes the
+/// raw transcript text (lines like `[0:00] some text`) and returns cleaned text.
+pub fn clean_transcript(transcript: &str) -> (String, CleanStats) {
+    let lines: Vec<String> = transcript.lines().map(|l| l.to_string()).collect();
+    let original_count = lines.len();
+
+    // Run all dedup layers
+    let lines = dedup_segments(lines);
+    let after_consecutive = lines.len();
+
+    let lines = dedup_interleaved(lines);
+    let after_interleaved = lines.len();
+
+    let lines = trim_trailing_noise(lines);
+    let after_trim = lines.len();
+
+    let stats = CleanStats {
+        original_lines: original_count,
+        after_consecutive_dedup: after_consecutive,
+        after_interleaved_dedup: after_interleaved,
+        after_trailing_trim: after_trim,
+        lines_removed: original_count.saturating_sub(after_trim),
+    };
+
+    (lines.join("\n"), stats)
+}
+
+/// Statistics from transcript cleaning.
+#[derive(Debug)]
+pub struct CleanStats {
+    pub original_lines: usize,
+    pub after_consecutive_dedup: usize,
+    pub after_interleaved_dedup: usize,
+    pub after_trailing_trim: usize,
+    pub lines_removed: usize,
+}
+
+/// Detect interleaved repetition patterns that escape consecutive dedup.
+///
+/// Whisper often hallucinates alternating patterns like:
+///   "So I'm going to pick his brain" / "Okay." / "So I'm going to pick his brain" / "Okay."
+/// or inserts short filler between repeated phrases. The consecutive dedup misses these
+/// because no two adjacent lines are similar.
+///
+/// Strategy: use a sliding window to detect when a single phrase dominates a region.
+/// If any phrase appears in >=50% of lines within a 10-line window, and the window
+/// contains at least 5 such occurrences, collapse the entire dominated region.
+#[allow(dead_code)] // Only used with whisper feature
+fn dedup_interleaved(lines: Vec<String>) -> Vec<String> {
+    if lines.len() < 6 {
+        return lines;
+    }
+
+    fn text_part(line: &str) -> &str {
+        // Lines: "[0:00] some text" or "[...] [repeated ...]"
+        line.find("] ").map(|i| &line[i + 2..]).unwrap_or(line)
+    }
+
+    fn normalize(text: &str) -> String {
+        text.to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Short filler phrases that whisper inserts between hallucinated repetitions.
+    fn is_filler(text: &str) -> bool {
+        let normalized = text.trim().to_lowercase();
+        let normalized = normalized.trim_matches(|c: char| !c.is_alphanumeric());
+        matches!(
+            normalized,
+            "okay"
+                | "ok"
+                | "yeah"
+                | "yes"
+                | "right"
+                | "so"
+                | "and"
+                | "but"
+                | "well"
+                | "uh"
+                | "um"
+                | "hmm"
+                | "mhm"
+        )
+    }
+
+    // Build normalized text for each line
+    let texts: Vec<String> = lines.iter().map(|l| normalize(text_part(l))).collect();
+    let fillers: Vec<bool> = texts.iter().map(|t| is_filler(t)).collect();
+
+    // Mark lines that are part of a hallucination region.
+    // A "hallucination region" is a contiguous span where one phrase dominates.
+    let mut remove = vec![false; lines.len()];
+
+    // Scan with a sliding window
+    let window_size = 10;
+    let min_occurrences = 5;
+
+    let mut i = 0;
+    while i + window_size <= lines.len() {
+        // Count phrase frequencies in this window (excluding fillers)
+        let mut freq: std::collections::BTreeMap<&str, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for j in i..i + window_size {
+            if !fillers[j] && !texts[j].is_empty() {
+                freq.entry(&texts[j]).or_default().push(j);
+            }
+        }
+
+        // Find the dominant phrase (BTreeMap for deterministic iteration order;
+        // break ties by phrase text so the result is reproducible across runs)
+        let dominant = freq
+            .iter()
+            .max_by(|(phrase_a, pos_a), (phrase_b, pos_b)| {
+                pos_a
+                    .len()
+                    .cmp(&pos_b.len())
+                    .then_with(|| phrase_a.cmp(phrase_b))
+            })
+            .filter(|(_, positions)| positions.len() >= min_occurrences);
+
+        if let Some((phrase, _)) = dominant {
+            let phrase = phrase.to_string();
+            // Extend the region: keep scanning forward while the phrase keeps appearing
+            let mut region_end = i + window_size;
+            while region_end < lines.len() {
+                let t = &texts[region_end];
+                if *t == phrase || fillers[region_end] {
+                    region_end += 1;
+                } else {
+                    // Allow a small gap (1-2 non-matching lines) if the phrase resumes
+                    let mut gap = 0;
+                    let mut found_resume = false;
+                    for t in texts
+                        .iter()
+                        .take(lines.len().min(region_end + 3))
+                        .skip(region_end)
+                    {
+                        if *t == phrase {
+                            found_resume = true;
+                            break;
+                        }
+                        gap += 1;
+                    }
+                    if found_resume && gap <= 2 {
+                        // Include the gap
+                        region_end += gap + 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            let region_len = region_end - i;
+
+            // Count actual occurrences of the dominant phrase in the full region
+            let actual_count = (i..region_end).filter(|&j| texts[j] == phrase).count();
+
+            if actual_count >= min_occurrences && region_len >= 6 {
+                tracing::warn!(
+                    region_start = i,
+                    region_end = region_end,
+                    occurrences = actual_count,
+                    filler_count = (i..region_end).filter(|&j| fillers[j]).count(),
+                    phrase = phrase,
+                    "detected interleaved hallucination loop — marking {} lines for removal",
+                    region_len
+                );
+                // Mark all lines in region except the first occurrence of the phrase
+                let mut kept_first = false;
+                for j in i..region_end {
+                    if !kept_first && texts[j] == phrase {
+                        kept_first = true; // keep the first one
+                    } else {
+                        remove[j] = true;
+                    }
+                }
+                i = region_end;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    let removed_count = remove.iter().filter(|&&r| r).count();
+    if removed_count > 0 {
+        let mut result = Vec::with_capacity(lines.len() - removed_count + 1);
+        let mut in_removed_run = false;
+
+        for (idx, line) in lines.iter().enumerate() {
+            if remove[idx] {
+                if !in_removed_run {
+                    in_removed_run = true;
+                    // Count how many we're about to skip
+                    let run_len = (idx..lines.len()).take_while(|&j| remove[j]).count();
+                    result.push(format!(
+                        "[...] [hallucinated repetition removed — {} lines collapsed]",
+                        run_len
+                    ));
+                }
+            } else {
+                in_removed_run = false;
+                result.push(line.clone());
+            }
+        }
+
+        tracing::info!(
+            original = lines.len(),
+            removed = removed_count,
+            remaining = result.len(),
+            "interleaved dedup complete"
+        );
+        result
+    } else {
+        lines
+    }
+}
+
+/// Trim trailing non-speech noise from the end of a transcript.
+///
+/// Recordings often capture music, silence, or ambient noise after the conversation
+/// ends. Long runs of `[music]`, `[BLANK_AUDIO]`, or very short filler at the end
+/// add no value and make the transcript look broken.
+#[allow(dead_code)] // Only used with whisper feature
+fn trim_trailing_noise(lines: Vec<String>) -> Vec<String> {
+    if lines.is_empty() {
+        return lines;
+    }
+
+    fn text_part(line: &str) -> &str {
+        line.find("] ").map(|i| &line[i + 2..]).unwrap_or(line)
+    }
+
+    fn is_noise(text: &str) -> bool {
+        let t = text.trim().to_lowercase();
+        t == "[music]"
+            || t == "[blank_audio]"
+            || t == "[silence]"
+            || t == "music"
+            || t == "you"                // common whisper hallucination on silence
+            || t == "okay."
+            || t == "yeah."
+        // Note: collapse markers ("[...] [repeated ...]") are NOT noise —
+        // treating them as noise would make clean_transcript non-idempotent.
+    }
+
+    // Walk backward from the end, counting consecutive noise lines
+    let mut trim_from = lines.len();
+    for i in (0..lines.len()).rev() {
+        let text = text_part(&lines[i]);
+        if is_noise(text) {
+            trim_from = i;
+        } else {
+            break;
+        }
+    }
+
+    // Only trim if we're removing a significant trailing block (5+ lines)
+    let trimmed_count = lines.len() - trim_from;
+    if trimmed_count >= 5 {
+        tracing::info!(
+            trimmed = trimmed_count,
+            "removed trailing noise from transcript"
+        );
+        let mut result: Vec<String> = lines[..trim_from].to_vec();
+        result.push(format!(
+            "\n[Recording ended — {} lines of trailing noise removed]",
+            trimmed_count
+        ));
+        result
+    } else {
+        lines
+    }
 }
 
 /// Strip silence from audio using energy detection, replacing long gaps with short padding.
@@ -1233,5 +1522,118 @@ mod tests {
         assert_eq!(result.len(), 5); // first + marker + second + marker + normal
         assert!(result[1].contains("2 identical"));
         assert!(result[3].contains("3 identical"));
+    }
+
+    // ── Interleaved dedup tests ──
+
+    #[test]
+    fn interleaved_catches_alternating_pattern() {
+        // The pharmacy recording pattern: phrase / "Okay." / phrase / "Okay." ...
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..20 {
+            let ts = i * 2;
+            if i % 2 == 0 {
+                lines.push(format!(
+                    "[{}:{:02}] So I'm going to pick his brain as well.",
+                    ts / 60,
+                    ts % 60
+                ));
+            } else {
+                lines.push(format!("[{}:{:02}] Okay.", ts / 60, ts % 60));
+            }
+        }
+        lines.push("[0:40] Something completely different".into());
+
+        let result = dedup_interleaved(lines);
+        // Should keep: the first occurrence of the phrase + collapse marker + the different line
+        assert!(
+            result.len() <= 4,
+            "expected <=4 lines, got {}: {:?}",
+            result.len(),
+            result
+        );
+        assert!(result.iter().any(|l| l.contains("pick his brain")));
+        assert!(result
+            .iter()
+            .any(|l| l.contains("hallucinated repetition removed")));
+        assert!(result
+            .last()
+            .unwrap()
+            .contains("Something completely different"));
+    }
+
+    #[test]
+    fn interleaved_leaves_normal_conversation() {
+        let lines = vec![
+            "[0:00] Hello how are you".into(),
+            "[0:05] I'm fine thanks".into(),
+            "[0:10] Great to hear".into(),
+            "[0:15] Let's talk about the project".into(),
+            "[0:20] Sure what's the update".into(),
+            "[0:25] We shipped the feature".into(),
+        ];
+        let result = dedup_interleaved(lines.clone());
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn interleaved_ignores_short_repeats() {
+        // Only 3 occurrences in 6 lines — below threshold
+        let lines = vec![
+            "[0:00] Hello world".into(),
+            "[0:02] Okay.".into(),
+            "[0:04] Hello world".into(),
+            "[0:06] Okay.".into(),
+            "[0:08] Hello world".into(),
+            "[0:10] Something else".into(),
+        ];
+        let result = dedup_interleaved(lines.clone());
+        // 3 occurrences in a 6-line span — below the min_occurrences=5 threshold
+        assert_eq!(result, lines);
+    }
+
+    // ── Trailing noise tests ──
+
+    #[test]
+    fn trim_trailing_music() {
+        let mut lines: Vec<String> = vec![
+            "[0:00] Hello world".into(),
+            "[0:05] Some real content".into(),
+        ];
+        for i in 0..20 {
+            lines.push(format!("[{}:00] [music]", i + 1));
+        }
+        let result = trim_trailing_noise(lines);
+        assert_eq!(result.len(), 3); // 2 real lines + trim marker
+        assert!(result[0].contains("Hello world"));
+        assert!(result[1].contains("real content"));
+        assert!(result[2].contains("trailing noise removed"));
+    }
+
+    #[test]
+    fn trim_keeps_short_trailing_noise() {
+        // Only 3 trailing music lines — below the 5-line threshold
+        let lines = vec![
+            "[0:00] Hello world".into(),
+            "[0:05] [music]".into(),
+            "[0:10] [music]".into(),
+            "[0:15] [music]".into(),
+        ];
+        let result = trim_trailing_noise(lines.clone());
+        assert_eq!(result, lines); // unchanged
+    }
+
+    #[test]
+    fn trim_handles_empty() {
+        assert!(trim_trailing_noise(vec![]).is_empty());
+    }
+
+    #[test]
+    fn trim_all_noise() {
+        let lines: Vec<String> = (0..10).map(|i| format!("[{}:00] [music]", i)).collect();
+        let result = trim_trailing_noise(lines);
+        // All noise — trim everything, left with just the marker
+        assert_eq!(result.len(), 1);
+        assert!(result[0].contains("trailing noise removed"));
     }
 }
